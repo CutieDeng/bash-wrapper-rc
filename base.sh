@@ -111,11 +111,12 @@ _telemetry_init() {
     _debug "Server IP: $server_ip"
     _debug "Server Port: $TELEMETRY_PORT"
     
-    # 2. 主动连接到服务器，获取初始化命令
+    # 2. 主动连接到服务器，发送 init datum 并获取初始化命令
     _debug "Connecting to init server..."
-    
-    local init_response
-    init_response=$(_tcp_send "$server_ip" "$TELEMETRY_PORT" "init")
+
+    local init_msg init_response
+    init_msg=$(_build_datum "init" "")
+    init_response=$(_tcp_send "$server_ip" "$TELEMETRY_PORT" "$init_msg")
     
     if [ -z "$init_response" ]; then
         _error "Init response is empty"
