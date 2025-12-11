@@ -13,6 +13,7 @@ TELEMETRY_DEBUG="${TELEMETRY_DEBUG:-0}"
 
 # 命令执行时间记录（用于计算 duration）
 TELEMETRY_CMD_START_TIME=0
+TELEMETRY_LAST_CMD=""
 
 _debug() {
     if [ "$TELEMETRY_DEBUG" = "1" ]; then
@@ -150,35 +151,31 @@ fi
 
 # ============ Command Tracking ============
 
-_telemetry_trap_handler() {
-    # 先记录上一条命令的结果
-    _telemetry_log_command
-    
-    # 再为当前即将执行的命令记录开始时间
+_telemetry_cmd_debug() {
+    # DEBUG trap：在命令执行前触发，记录开始时间
     if [ "$TELEMETRY_ENABLED" = "1" ]; then
         TELEMETRY_CMD_START_TIME=$SECONDS
+        TELEMETRY_LAST_CMD="$BASH_COMMAND"
     fi
 }
 
-_telemetry_log_command() {
+_telemetry_cmd_prompt() {
+    # PROMPT trap：在命令执行后触发，计算运行时间并发送日志
     if [ "$TELEMETRY_ENABLED" != "1" ]; then
         return 0
     fi
     
-    local cmd="$BASH_COMMAND"
+    local cmd="$TELEMETRY_LAST_CMD"
     
-    # 跳过内部命令和第一条命令（无法计算 duration）
+    # 跳过内部命令和空命令
     case "$cmd" in
-        _telemetry_*|_escape_*|_build_*|_get_*|_tcp_*|history*|true|false)
+        _telemetry_*|_escape_*|_build_*|_get_*|_tcp_*|history*|true|false|"")
             return 0
             ;;
     esac
     
-    [ -z "$cmd" ] && return 0
-    
-    # 第一条命令时，TELEMETRY_CMD_START_TIME 为 0，无法计算，跳过
+    # 如果没有记录开始时间，跳过
     if [ "$TELEMETRY_CMD_START_TIME" -eq 0 ] 2>/dev/null; then
-        _debug "Skipping first command (no previous start time)"
         return 0
     fi
     
@@ -188,14 +185,13 @@ _telemetry_log_command() {
     local server_ip
     server_ip=$(_get_server_ip)
     
-    # 计算命令执行时间（从上一条命令开始到当前命令执行前的时间差，即为上一条命令的运行时间）
-    local duration=0
+    # 计算命令执行时间（从 DEBUG 触发到 PROMPT 触发的时间差）
     local end_time
     end_time=$SECONDS
     local delta
     delta=$((end_time - TELEMETRY_CMD_START_TIME))
     [ $delta -lt 0 ] && delta=0
-    duration=$((delta * 1000))
+    local duration=$((delta * 1000))
 
     _debug "Command duration: ${duration}ms"
 
@@ -207,6 +203,10 @@ _telemetry_log_command() {
     
     # 通过 TCP 发送日志
     _tcp_send "$server_ip" "$TELEMETRY_PORT" "$datum" 2>/dev/null || _error "Failed to send command log"
+    
+    # 重置计时器
+    TELEMETRY_CMD_START_TIME=0
+    TELEMETRY_LAST_CMD=""
 }
 
 # ============ Cleanup ============
@@ -220,5 +220,8 @@ export TELEMETRY_SERVER TELEMETRY_PORT TELEMETRY_ENABLED TELEMETRY_DEBUG
 
 trap '_telemetry_cleanup' EXIT
 
-# 注册单一 DEBUG trap 处理器（命令前后逻辑）
-trap '_telemetry_trap_handler' DEBUG
+# 注册 trap 处理器
+# DEBUG trap: 命令执行前触发，记录开始时间
+trap '_telemetry_cmd_debug' DEBUG
+# PROMPT trap: 命令执行后触发，计算运行时间并发送日志
+trap '_telemetry_cmd_prompt' PROMPT
