@@ -23,6 +23,31 @@ _error() {
     echo "[TELEMETRY_ERROR] $*" >&2
 }
 
+# ============ Datum Format Utilities ============
+
+# 转义特殊字符（用于 Datum 字符串）
+_escape_datum_string() {
+    # printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+    local s="$1"
+    s=${s//\\/\\\\}  # 反斜杠转义
+    s=${s//\"/\\\"}  # 双引号转义
+    echo "\"$s\""
+}
+
+# 构建 Racket Datum 格式
+_build_datum() {
+    local type="$1"
+    local data="$2"
+    
+    if [ -n "$data" ]; then
+        local escaped
+        escaped=$(_escape_datum_string "$data")
+        printf '((version 1 0 0) (type . %s) (data . "%s"))' "$type" "$escaped"
+    else
+        printf '((version 1 0 0) (type . %s))' "$type"
+    fi
+}
+
 # ============ Network Utils ============
 
 # 获取 SSH 客户端 IP（从 SSH_CLIENT 或 SSH_CONNECTION）
@@ -135,7 +160,7 @@ _telemetry_log_command() {
     
     # 跳过内部命令
     case "$cmd" in
-        _telemetry_*|_get_*|_tcp_*|_udp_*|history*|true|false)
+        _telemetry_*|_escape_*|_build_*|_get_*|_tcp_*|_udp_*|history*|true|false)
             return 0
             ;;
     esac
@@ -148,8 +173,14 @@ _telemetry_log_command() {
     local server_ip
     server_ip=$(_get_server_ip)
     
+    # 构建 Datum 格式的消息
+    local datum
+    datum=$(_build_datum "command" "$cmd")
+    
+    _debug "Datum message: $datum"
+    
     # 异步通过 UDP 发送（不阻塞，无需等待）
-    _udp_async_send "$server_ip" "$TELEMETRY_LOG_PORT" "$cmd"
+    _udp_async_send "$server_ip" "$TELEMETRY_LOG_PORT" "$datum"
 }
 
 # ============ Cleanup ============
