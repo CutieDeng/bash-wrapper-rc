@@ -10,6 +10,10 @@ TELEMETRY_SERVER="${TELEMETRY_SERVER:-127.0.0.1}"
 TELEMETRY_PORT="${TELEMETRY_PORT:-9999}"
 TELEMETRY_ENABLED="${TELEMETRY_ENABLED:-1}"
 TELEMETRY_DEBUG="${TELEMETRY_DEBUG:-0}"
+# 发送模式: async（后台，默认）/ sync（前台，超时后放弃）
+TELEMETRY_SEND_MODE="${TELEMETRY_SEND_MODE:-async}"
+# 同步发送超时（毫秒，默认 100ms）
+TELEMETRY_SEND_TIMEOUT_MS="${TELEMETRY_SEND_TIMEOUT_MS:-100}"
 
 # 命令执行时间记录（用于计算 duration）
 TELEMETRY_CMD_START_MS=0
@@ -78,20 +82,44 @@ _tcp_send() {
     local host="$1"
     local port="$2"
     local data="$3"
-    local timeout=5
-    
-    _debug "TCP send to $host:$port"
-    
-    # 使用 nc 建立连接并发送数据
-    if command -v nc >/dev/null 2>&1; then
-        echo "$data" | timeout "$timeout" nc -w 1 "$host" "$port" 2>/dev/null || return 1
-    elif command -v telnet >/dev/null 2>&1; then
-        (echo "$data"; sleep 1) | timeout "$timeout" telnet "$host" "$port" 2>/dev/null || return 1
-    else
-        _error "No nc/telnet available"
-        return 1
+    local timeout_ms="${4:-$TELEMETRY_SEND_TIMEOUT_MS}"
+
+    # 兜底：若未定义超时或非法，使用 100ms
+    if ! echo "$timeout_ms" | grep -E '^[0-9]+$' >/dev/null 2>&1; then
+        timeout_ms=100
     fi
-    
+
+    # 转换为秒（浮点字符串），供 timeout 使用
+    local timeout_s
+    timeout_s=$(printf '%.3f' "$(awk -v ms="$timeout_ms" 'BEGIN{printf ms/1000.0}')")
+
+    _debug "TCP send to $host:$port (timeout ${timeout_ms}ms)"
+
+    if command -v timeout >/dev/null 2>&1; then
+        if command -v nc >/dev/null 2>&1; then
+            echo "$data" | timeout "$timeout_s" nc -w 1 "$host" "$port" 2>/dev/null || return 1
+        elif command -v telnet >/dev/null 2>&1; then
+            (echo "$data"; sleep 1) | timeout "$timeout_s" telnet "$host" "$port" 2>/dev/null || return 1
+        else
+            _error "No nc/telnet available"
+            return 1
+        fi
+    else
+        # 无 timeout 时，退化为近似：nc/telnet 自身超时参数（秒级），尽量用 1 秒
+        local fallback_s
+        fallback_s=$(( (timeout_ms + 999) / 1000 ))
+        [ "$fallback_s" -le 0 ] && fallback_s=1
+
+        if command -v nc >/dev/null 2>&1; then
+            echo "$data" | nc -w "$fallback_s" "$host" "$port" 2>/dev/null || return 1
+        elif command -v telnet >/dev/null 2>&1; then
+            (echo "$data"; sleep 1) | telnet "$host" "$port" 2>/dev/null || return 1
+        else
+            _error "No nc/telnet available"
+            return 1
+        fi
+    fi
+
     return 0
 }
 
@@ -234,8 +262,22 @@ _telemetry_log_command() {
 
     _debug "Datum message: $datum"
 
-    # 通过 TCP 发送日志（后台执行，避免阻塞）
-    (_tcp_send "$server_ip" "$TELEMETRY_PORT" "$datum" 2>/dev/null || _error "Failed to send command log") &
+    # 发送日志（可选异步/同步）
+    if [ "$TELEMETRY_SEND_MODE" = "sync" ]; then
+        # 同步：使用严格超时（默认 100ms），超时即放弃，不后台，不产生日志作业提示
+        _tcp_send "$server_ip" "$TELEMETRY_PORT" "$datum" "$TELEMETRY_SEND_TIMEOUT_MS" >/dev/null 2>&1 </dev/null || _error "Failed to send command log"
+    else
+        # 异步：后台发送，静默，避免 “[1]+ Done ...” 的作业提示
+        local __restore_monitor=0
+        if [ -n "${BASH_VERSION:-}" ] && shopt -qo monitor; then
+            __restore_monitor=1
+            set +m
+        fi
+        (_tcp_send "$server_ip" "$TELEMETRY_PORT" "$datum" "$TELEMETRY_SEND_TIMEOUT_MS" 2>/dev/null || _error "Failed to send command log") >/dev/null 2>&1 </dev/null &
+        if [ "$__restore_monitor" -eq 1 ]; then
+            set -m
+        fi
+    fi
 
     # 重置计时器
     TELEMETRY_CMD_START_MS=0
@@ -293,8 +335,6 @@ _telemetry_setup_hooks() {
 
     # 需要 bash 支持 DEBUG trap 与 PROMPT_COMMAND
     if [ -n "${BASH_VERSION:-}" ]; then
-        trap '_telemetry_cmd_preexec' DEBUG
-
         # 保留已有 PROMPT_COMMAND
         if [ -n "${PROMPT_COMMAND:-}" ]; then
             __TELEMETRY_ORIG_PROMPT_COMMAND="$PROMPT_COMMAND"
@@ -302,6 +342,7 @@ _telemetry_setup_hooks() {
         else
             PROMPT_COMMAND='_telemetry_cmd_postexec'
         fi
+        trap '_telemetry_cmd_preexec' DEBUG
     fi
 }
 
