@@ -318,9 +318,8 @@ _telemetry_cleanup() {
 # 导出配置
 export TELEMETRY_SERVER TELEMETRY_PORT TELEMETRY_ENABLED TELEMETRY_DEBUG
 
+
+# trap '_telemetry_cleanup' EXIT
+
 # 注册命令跟踪钩子
 _telemetry_setup_hooks
-
-trap '_telemetry_cleanup' EXIT
-
-# PROMPT_COMMAND 与 DEBUG trap 已在 _telemetry_setup_hooks 中注册
