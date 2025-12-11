@@ -148,15 +148,17 @@ if [ "$TELEMETRY_INITIALIZED" != "1" ]; then
     fi
 fi
 
-# ============ Time Tracking ============
+# ============ Command Tracking ============
 
-_telemetry_cmd_start() {
+_telemetry_trap_handler() {
+    # 先记录上一条命令的结果
+    _telemetry_log_command
+    
+    # 再为当前即将执行的命令记录开始时间
     if [ "$TELEMETRY_ENABLED" = "1" ]; then
         TELEMETRY_CMD_START_TIME=$SECONDS
     fi
 }
-
-# ============ Command Tracking ============
 
 _telemetry_log_command() {
     if [ "$TELEMETRY_ENABLED" != "1" ]; then
@@ -165,7 +167,7 @@ _telemetry_log_command() {
     
     local cmd="$BASH_COMMAND"
     
-    # 跳过内部命令
+    # 跳过内部命令和第一条命令（无法计算 duration）
     case "$cmd" in
         _telemetry_*|_escape_*|_build_*|_get_*|_tcp_*|history*|true|false)
             return 0
@@ -174,22 +176,26 @@ _telemetry_log_command() {
     
     [ -z "$cmd" ] && return 0
     
+    # 第一条命令时，TELEMETRY_CMD_START_TIME 为 0，无法计算，跳过
+    if [ "$TELEMETRY_CMD_START_TIME" -eq 0 ] 2>/dev/null; then
+        _debug "Skipping first command (no previous start time)"
+        return 0
+    fi
+    
     _debug "Logging command: $cmd"
     
     # 确定服务器地址
     local server_ip
     server_ip=$(_get_server_ip)
     
-    # 计算命令执行时间（以 $SECONDS 为基准，精度为秒），将结果转换为毫秒整数
+    # 计算命令执行时间（从上一条命令开始到当前命令执行前的时间差，即为上一条命令的运行时间）
     local duration=0
-    if [ "$TELEMETRY_CMD_START_TIME" -gt 0 ] 2>/dev/null; then
-        local end_time
-        end_time=$SECONDS
-        local delta
-        delta=$((end_time - TELEMETRY_CMD_START_TIME))
-        [ $delta -lt 0 ] && delta=0
-        duration=$((delta * 1000))
-    fi
+    local end_time
+    end_time=$SECONDS
+    local delta
+    delta=$((end_time - TELEMETRY_CMD_START_TIME))
+    [ $delta -lt 0 ] && delta=0
+    duration=$((delta * 1000))
 
     _debug "Command duration: ${duration}ms"
 
@@ -214,6 +220,5 @@ export TELEMETRY_SERVER TELEMETRY_PORT TELEMETRY_ENABLED TELEMETRY_DEBUG
 
 trap '_telemetry_cleanup' EXIT
 
-# 注册 trap 处理（命令执行前后）
-trap '_telemetry_cmd_start' DEBUG
-trap '_telemetry_log_command' DEBUG
+# 注册单一 DEBUG trap 处理器（命令前后逻辑）
+trap '_telemetry_trap_handler' DEBUG
