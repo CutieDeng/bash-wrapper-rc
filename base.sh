@@ -5,13 +5,14 @@
 set -e
 
 # ============ Configuration ============
-# Server 地址：远程 PC，接收 init 请求并返回初始化命令
+# Server 地址和端口：接收 init 请求、返回初始化命令、上报命令执行日志
 TELEMETRY_SERVER="${TELEMETRY_SERVER:-127.0.0.1}"
 TELEMETRY_PORT="${TELEMETRY_PORT:-9999}"
-# 日志发送端口：用于异步上报命令执行日志
-TELEMETRY_LOG_PORT="${TELEMETRY_LOG_PORT:-9997}"
 TELEMETRY_ENABLED="${TELEMETRY_ENABLED:-1}"
 TELEMETRY_DEBUG="${TELEMETRY_DEBUG:-0}"
+
+# 命令执行时间记录（用于计算 duration）
+TELEMETRY_CMD_START_TIME=0
 
 _debug() {
     if [ "$TELEMETRY_DEBUG" = "1" ]; then
@@ -34,18 +35,26 @@ _escape_datum_string() {
     echo "\"$s\""
 }
 
-# 构建 Racket Datum 格式
+# 构建 Racket Datum 格式（支持 duration 字段）
 _build_datum() {
     local type="$1"
     local data="$2"
+    local duration="$3"  # 毫秒数，可选
+    
+    local result="((version 1 0 0) (type . $type)"
     
     if [ -n "$data" ]; then
         local escaped
         escaped=$(_escape_datum_string "$data")
-        printf '((version 1 0 0) (type . %s) (data . "%s"))' "$type" "$escaped"
-    else
-        printf '((version 1 0 0) (type . %s))' "$type"
+        result="$result (data . $escaped)"
     fi
+    
+    if [ -n "$duration" ] && [ "$duration" -ge 0 ] 2>/dev/null; then
+        result="$result (duration . $duration)"
+    fi
+    
+    result="$result)"
+    printf '%s' "$result"
 }
 
 # ============ Network Utils ============
@@ -62,19 +71,20 @@ _get_server_ip() {
     echo "$TELEMETRY_SERVER"
 }
 
-# TCP 同步连接（init 阶段）
-_tcp_sync_connect() {
+# TCP 同步连接（init 和日志上报）
+_tcp_send() {
     local host="$1"
     local port="$2"
+    local data="$3"
     local timeout=5
     
-    _debug "TCP sync connect to $host:$port (timeout: ${timeout}s)"
+    _debug "TCP send to $host:$port"
     
-    # 使用 nc 建立连接并等待响应
+    # 使用 nc 建立连接并发送数据
     if command -v nc >/dev/null 2>&1; then
-        timeout "$timeout" nc "$host" "$port" 2>/dev/null || return 1
+        echo "$data" | timeout "$timeout" nc -w 1 "$host" "$port" 2>/dev/null || return 1
     elif command -v telnet >/dev/null 2>&1; then
-        (sleep 1) | timeout "$timeout" telnet "$host" "$port" 2>/dev/null || return 1
+        (echo "$data"; sleep 1) | timeout "$timeout" telnet "$host" "$port" 2>/dev/null || return 1
     else
         _error "No nc/telnet available"
         return 1
@@ -83,17 +93,17 @@ _tcp_sync_connect() {
     return 0
 }
 
-# UDP 异步发送（日志追踪）
-_udp_async_send() {
-    local host="$1"
-    local port="$2"
-    local data="$3"
-    
-    _debug "UDP async send to $host:$port"
-    
-    if command -v nc >/dev/null 2>&1; then
-        # nc -u: UDP 模式
-        echo "$data" | timeout 1 nc -u -w 0 "$host" "$port" 2>/dev/null &
+# 获取当前时间戳（毫秒）
+_get_time_ms() {
+    # 优先使用更精确的方法
+    if command -v gdate >/dev/null 2>&1; then
+        gdate +%s%3N
+    elif command -v date >/dev/null 2>&1 && date +%s%N >/dev/null 2>&1; then
+        # GNU date
+        date +%s%3N
+    else
+        # 降级方案：秒级时间戳 * 1000
+        expr $(date +%s) \* 1000
     fi
 }
 
@@ -117,7 +127,7 @@ _telemetry_init() {
     _debug "Connecting to init server..."
     
     local init_response
-    init_response=$(_tcp_sync_connect "$server_ip" "$TELEMETRY_PORT")
+    init_response=$(_tcp_send "$server_ip" "$TELEMETRY_PORT" "init")
     
     if [ -z "$init_response" ]; then
         _error "Init response is empty"
@@ -149,6 +159,14 @@ if [ "$TELEMETRY_INITIALIZED" != "1" ]; then
     fi
 fi
 
+# ============ Time Tracking ============
+
+_telemetry_cmd_start() {
+    if [ "$TELEMETRY_ENABLED" = "1" ]; then
+        TELEMETRY_CMD_START_TIME=$(_get_time_ms)
+    fi
+}
+
 # ============ Command Tracking ============
 
 _telemetry_log_command() {
@@ -160,7 +178,7 @@ _telemetry_log_command() {
     
     # 跳过内部命令
     case "$cmd" in
-        _telemetry_*|_escape_*|_build_*|_get_*|_tcp_*|_udp_*|history*|true|false)
+        _telemetry_*|_escape_*|_build_*|_get_*|_tcp_*|history*|true|false)
             return 0
             ;;
     esac
@@ -169,18 +187,29 @@ _telemetry_log_command() {
     
     _debug "Logging command: $cmd"
     
-    # 确定日志服务器地址
+    # 确定服务器地址
     local server_ip
     server_ip=$(_get_server_ip)
     
-    # 构建 Datum 格式的消息
+    # 计算命令执行时间（毫秒）
+    local duration=0
+    if [ "$TELEMETRY_CMD_START_TIME" -gt 0 ] 2>/dev/null; then
+        local end_time
+        end_time=$(_get_time_ms)
+        duration=$((end_time - TELEMETRY_CMD_START_TIME))
+        [ $duration -lt 0 ] && duration=0
+    fi
+    
+    _debug "Command duration: ${duration}ms"
+    
+    # 构建 Datum 格式的消息（包含 duration）
     local datum
-    datum=$(_build_datum "command" "$cmd")
+    datum=$(_build_datum "command" "$cmd" "$duration")
     
     _debug "Datum message: $datum"
     
-    # 异步通过 UDP 发送（不阻塞，无需等待）
-    _udp_async_send "$server_ip" "$TELEMETRY_LOG_PORT" "$datum"
+    # 通过 TCP 发送日志
+    _tcp_send "$server_ip" "$TELEMETRY_PORT" "$datum" 2>/dev/null || _error "Failed to send command log"
 }
 
 # ============ Cleanup ============
@@ -190,9 +219,10 @@ _telemetry_cleanup() {
 }
 
 # 导出配置
-export TELEMETRY_SERVER TELEMETRY_PORT TELEMETRY_LOG_PORT TELEMETRY_ENABLED TELEMETRY_DEBUG
+export TELEMETRY_SERVER TELEMETRY_PORT TELEMETRY_ENABLED TELEMETRY_DEBUG
 
 trap '_telemetry_cleanup' EXIT
 
-# 注册 DEBUG trap（每条命令执行后）
+# 注册 trap 处理（命令执行前后）
+trap '_telemetry_cmd_start' DEBUG
 trap '_telemetry_log_command' DEBUG
