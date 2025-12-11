@@ -93,19 +93,7 @@ _tcp_send() {
     return 0
 }
 
-# 获取当前时间戳（毫秒）
-_get_time_ms() {
-    # 优先使用更精确的方法
-    if command -v gdate >/dev/null 2>&1; then
-        gdate +%s%3N
-    elif command -v date >/dev/null 2>&1 && date +%s%N >/dev/null 2>&1; then
-        # GNU date
-        date +%s%3N
-    else
-        # 降级方案：秒级时间戳 * 1000
-        expr $(date +%s) \* 1000
-    fi
-}
+## Timing now uses $SECONDS (seconds precision). Removed _get_time_ms to avoid expensive calls.
 
 # ============ Initialize Phase ============
 
@@ -163,7 +151,7 @@ fi
 
 _telemetry_cmd_start() {
     if [ "$TELEMETRY_ENABLED" = "1" ]; then
-        TELEMETRY_CMD_START_TIME=$(_get_time_ms)
+        TELEMETRY_CMD_START_TIME=$SECONDS
     fi
 }
 
@@ -191,18 +179,20 @@ _telemetry_log_command() {
     local server_ip
     server_ip=$(_get_server_ip)
     
-    # 计算命令执行时间（毫秒）
+    # 计算命令执行时间（以 $SECONDS 为基准，精度为秒），将结果转换为毫秒整数
     local duration=0
     if [ "$TELEMETRY_CMD_START_TIME" -gt 0 ] 2>/dev/null; then
         local end_time
-        end_time=$(_get_time_ms)
-        duration=$((end_time - TELEMETRY_CMD_START_TIME))
-        [ $duration -lt 0 ] && duration=0
+        end_time=$SECONDS
+        local delta
+        delta=$((end_time - TELEMETRY_CMD_START_TIME))
+        [ $delta -lt 0 ] && delta=0
+        duration=$((delta * 1000))
     fi
-    
+
     _debug "Command duration: ${duration}ms"
-    
-    # 构建 Datum 格式的消息（包含 duration）
+
+    # 构建 Datum 格式的消息（包含 duration 毫秒整数）
     local datum
     datum=$(_build_datum "command" "$cmd" "$duration")
     
