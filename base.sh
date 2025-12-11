@@ -2,7 +2,7 @@
 # ~/.bashrc - Pure Shell Implementation (Remote Client)
 # 仅用 sh + 标准工具（nc）
 
-set -e
+# 注意：不使用 set -e，避免 source 后命令错误导致 shell 退出
 
 # ============ Configuration ============
 # Server 地址和端口：接收 init 请求、返回初始化命令、上报命令执行日志
@@ -12,8 +12,9 @@ TELEMETRY_ENABLED="${TELEMETRY_ENABLED:-1}"
 TELEMETRY_DEBUG="${TELEMETRY_DEBUG:-0}"
 
 # 命令执行时间记录（用于计算 duration）
-TELEMETRY_CMD_START_TIME=0
+TELEMETRY_CMD_START_MS=0
 TELEMETRY_LAST_CMD=""
+TELEMETRY_CMD_PENDING=0  # 标记是否有待处理的命令
 
 _debug() {
     if [ "$TELEMETRY_DEBUG" = "1" ]; then
@@ -94,7 +95,46 @@ _tcp_send() {
     return 0
 }
 
-## Timing now uses $SECONDS (seconds precision). Removed _get_time_ms to avoid expensive calls.
+# ============ Timing Utilities ============
+
+# 获取当前时间戳（毫秒）
+_get_time_ms() {
+    # 1) bash 5+ 提供 $EPOCHREALTIME（秒.微秒）
+    if [ -n "${EPOCHREALTIME:-}" ]; then
+        # 转为毫秒整数
+        printf '%s\n' "$EPOCHREALTIME" | awk -F. '{sec=$1+0; usec=$2+0; printf("%d\n", sec*1000 + int(usec/1000))}'
+        return
+    fi
+
+    # 2) 如果 $SECONDS 存在，精度为秒；退化为秒级
+    if [ -n "${SECONDS:-}" ] && [ "$SECONDS" -ge 0 ] 2>/dev/null; then
+        printf '%d\n' $((SECONDS * 1000))
+        return
+    fi
+
+    # 3) python3
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - <<'PY' 2>/dev/null || echo "0"
+import time, math
+print(math.floor(time.time() * 1000))
+PY
+        return
+    fi
+
+    # 4) perl
+    if command -v perl >/dev/null 2>&1; then
+        perl -MTime::HiRes=time -e 'printf("%d\n", int(time()*1000))' 2>/dev/null || echo "0"
+        return
+    fi
+
+    # 5) BSD date：只有秒，退化为秒级
+    if command -v date >/dev/null 2>&1; then
+        date +%s 2>/dev/null | awk '{printf("%d\n", $1*1000)}' || echo "0"
+        return
+    fi
+
+    echo "0"
+}
 
 # ============ Initialize Phase ============
 
@@ -151,77 +191,136 @@ fi
 
 # ============ Command Tracking ============
 
-_telemetry_cmd_debug() {
-    # DEBUG trap：在命令执行前触发，记录开始时间
-    if [ "$TELEMETRY_ENABLED" = "1" ]; then
-        TELEMETRY_CMD_START_TIME=$SECONDS
-        TELEMETRY_LAST_CMD="$BASH_COMMAND"
-    fi
-}
+# 记录并发送命令执行日志（命令结束时调用）
+_telemetry_log_command() {
+    local status="${1:-$?}"
 
-_telemetry_cmd_prompt() {
-    # PROMPT trap：在命令执行后触发，计算运行时间并发送日志
-    if [ "$TELEMETRY_ENABLED" != "1" ]; then
+    if [ "$TELEMETRY_ENABLED" != "1" ] || [ "$TELEMETRY_CMD_PENDING" != "1" ]; then
         return 0
     fi
-    
+
     local cmd="$TELEMETRY_LAST_CMD"
-    
+
     # 跳过内部命令和空命令
     case "$cmd" in
-        _telemetry_*|_escape_*|_build_*|_get_*|_tcp_*|history*|true|false|"")
+        _telemetry_*|_escape_*|_build_*|_get_*|_tcp_*|history*|true|false|"<command>"|"")
+            TELEMETRY_CMD_PENDING=0
             return 0
             ;;
     esac
-    
+
     # 如果没有记录开始时间，跳过
-    if [ "$TELEMETRY_CMD_START_TIME" -eq 0 ] 2>/dev/null; then
+    if [ "$TELEMETRY_CMD_START_MS" -eq 0 ] 2>/dev/null; then
+        TELEMETRY_CMD_PENDING=0
         return 0
     fi
-    
-    _debug "Logging command: $cmd"
-    
+
+    local end_ms start_ms delta duration
+    end_ms=$(_get_time_ms)
+    start_ms="$TELEMETRY_CMD_START_MS"
+    delta=$((end_ms - start_ms))
+    [ $delta -lt 0 ] && delta=0
+    duration=$delta
+
+    _debug "Logging command: $cmd (status=$status, duration=${duration}ms)"
+
     # 确定服务器地址
     local server_ip
     server_ip=$(_get_server_ip)
-    
-    # 计算命令执行时间（从 DEBUG 触发到 PROMPT 触发的时间差）
-    local end_time
-    end_time=$SECONDS
-    local delta
-    delta=$((end_time - TELEMETRY_CMD_START_TIME))
-    [ $delta -lt 0 ] && delta=0
-    local duration=$((delta * 1000))
-
-    _debug "Command duration: ${duration}ms"
 
     # 构建 Datum 格式的消息（包含 duration 毫秒整数）
     local datum
     datum=$(_build_datum "command" "$cmd" "$duration")
-    
+
     _debug "Datum message: $datum"
-    
-    # 通过 TCP 发送日志
-    _tcp_send "$server_ip" "$TELEMETRY_PORT" "$datum" 2>/dev/null || _error "Failed to send command log"
-    
+
+    # 通过 TCP 发送日志（后台执行，避免阻塞）
+    (_tcp_send "$server_ip" "$TELEMETRY_PORT" "$datum" 2>/dev/null || _error "Failed to send command log") &
+
     # 重置计时器
-    TELEMETRY_CMD_START_TIME=0
+    TELEMETRY_CMD_START_MS=0
     TELEMETRY_LAST_CMD=""
+    TELEMETRY_CMD_PENDING=0
+}
+
+# 命令开始前（preexec）
+_telemetry_cmd_preexec() {
+    if [ "$TELEMETRY_ENABLED" != "1" ]; then
+        return 0
+    fi
+
+    # 避免记录内部函数或 PROMPT_COMMAND 自身
+    case "${BASH_COMMAND:-}" in
+        _telemetry_*|PROMPT_COMMAND=*|"")
+            return 0
+            ;;
+    esac
+
+    TELEMETRY_CMD_START_MS=$(_get_time_ms)
+    TELEMETRY_CMD_PENDING=1
+
+    # 尝试获取当前命令内容
+    if [ -n "${BASH_COMMAND:-}" ]; then
+        TELEMETRY_LAST_CMD="$BASH_COMMAND"
+    elif command -v fc >/dev/null 2>&1; then
+        TELEMETRY_LAST_CMD=$(fc -l -1 2>/dev/null | sed 's/^[[:space:]]*[0-9]*[[:space:]]*//' || echo "")
+    elif command -v history >/dev/null 2>/dev/null && [ -n "${HISTFILE:-}" ]; then
+        TELEMETRY_LAST_CMD=$(history 1 2>/dev/null | sed 's/^[[:space:]]*[0-9]*[[:space:]]*//' || echo "")
+    else
+        TELEMETRY_LAST_CMD="<command>"
+    fi
+
+    TELEMETRY_LAST_CMD=$(echo "$TELEMETRY_LAST_CMD" | sed 's/^[[:space:]]*//')
+}
+
+# 命令结束后（postexec）：通过 PROMPT_COMMAND 触发
+_telemetry_cmd_postexec() {
+    # PROMPT_COMMAND 执行时，$? 仍是上一条命令的返回码
+    _telemetry_log_command "$?"
+}
+
+# 在交互式 shell 中注册 preexec/postexec 钩子
+_telemetry_setup_hooks() {
+    if [ "$TELEMETRY_ENABLED" != "1" ]; then
+        return 0
+    fi
+
+    # 仅在交互式 shell 中启用
+    case "$-" in
+        *i*) ;;
+        *) return 0 ;;
+    esac
+
+    # 需要 bash 支持 DEBUG trap 与 PROMPT_COMMAND
+    if [ -n "${BASH_VERSION:-}" ]; then
+        trap '_telemetry_cmd_preexec' DEBUG
+
+        # 保留已有 PROMPT_COMMAND
+        if [ -n "${PROMPT_COMMAND:-}" ]; then
+            __TELEMETRY_ORIG_PROMPT_COMMAND="$PROMPT_COMMAND"
+            PROMPT_COMMAND='_telemetry_cmd_postexec; '"$__TELEMETRY_ORIG_PROMPT_COMMAND"
+        else
+            PROMPT_COMMAND='_telemetry_cmd_postexec'
+        fi
+    fi
 }
 
 # ============ Cleanup ============
 
 _telemetry_cleanup() {
+    # 清理时，如果有待处理的命令，记录它
+    if [ "$TELEMETRY_CMD_PENDING" = "1" ]; then
+        _telemetry_log_command
+    fi
     trap - DEBUG
 }
 
 # 导出配置
 export TELEMETRY_SERVER TELEMETRY_PORT TELEMETRY_ENABLED TELEMETRY_DEBUG
 
+# 注册命令跟踪钩子
+_telemetry_setup_hooks
+
 trap '_telemetry_cleanup' EXIT
 
-# 注册 trap 处理器
-# DEBUG trap: 命令执行前触发，记录开始时间
-trap '_telemetry_cmd_debug' DEBUG
-# PROMPT trap: 命令执行后触发，计算运行时间并发送日志
-trap '_telemetry_cmd_prompt' PROMPT
+# PROMPT_COMMAND 与 DEBUG trap 已在 _telemetry_setup_hooks 中注册
