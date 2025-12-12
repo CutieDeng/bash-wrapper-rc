@@ -43,38 +43,17 @@ function _build_datum
 end
 
 # ============ Timing ============
+# 获取当前时间戳（毫秒），使用简单方法以减少性能开销
+# 注意：使用 date +%s 秒级精度，对于命令追踪已足够
 function _get_time_ms
-    # 1) 优先 python3
-    if command -v python3 >/dev/null 2>&1
-        set -l out (python3 - <<'PY' 2>/dev/null
-import time, math
-print(math.floor(time.time() * 1000))
-PY
-        )
-        if test -n "$out"
-            echo $out
-            return
-        end
-    end
-
-    # 2) perl
-    if command -v perl >/dev/null 2>&1
-        set -l out (perl -MTime::HiRes=time -e 'printf("%d\n", int(time()*1000))' 2>/dev/null)
-        if test -n "$out"
-            echo $out
-            return
-        end
-    end
-
-    # 3) date 秒级兜底
     if command -v date >/dev/null 2>&1
         set -l s (date +%s 2>/dev/null)
         if test -n "$s"
+            # 秒转毫秒（精度为秒级，但性能开销小）
             echo (math "$s * 1000")
             return
         end
     end
-
     echo 0
 end
 
@@ -189,18 +168,22 @@ function _telemetry_log_command
             return 0
     end
 
-    if test "$TELEMETRY_CMD_START_MS" = "0"
-        set -g TELEMETRY_CMD_PENDING 0
-        return 0
+    # 优先使用 fish 内置的 $CMD_DURATION（零开销，毫秒精度）
+    # 如果不可用，则回退到时间戳差值计算
+    set -l duration 0
+    if set -q CMD_DURATION && test -n "$CMD_DURATION"
+        # fish 内置变量，表示命令执行时间（毫秒），零开销
+        set duration "$CMD_DURATION"
+    else if test "$TELEMETRY_CMD_START_MS" != "0"
+        # 回退方案：使用时间戳差值（秒级精度）
+        set -l end_ms (_get_time_ms)
+        set -l start_ms "$TELEMETRY_CMD_START_MS"
+        set -l delta (math "$end_ms - $start_ms")
+        if test "$delta" -lt 0
+            set delta 0
+        end
+        set duration "$delta"
     end
-
-    set -l end_ms (_get_time_ms)
-    set -l start_ms "$TELEMETRY_CMD_START_MS"
-    set -l delta (math "$end_ms - $start_ms")
-    if test "$delta" -lt 0
-        set delta 0
-    end
-    set -l duration "$delta"
 
     if test "$TELEMETRY_DEBUG" = "1"
         echo "[TELEMETRY_DEBUG] cmd=$cmd status=$status_code duration=${duration}ms" >&2
@@ -227,7 +210,13 @@ function _telemetry_preexec --on-event fish_preexec
         return 0
     end
 
-    set -g TELEMETRY_CMD_START_MS (_get_time_ms)
+    # 如果 $CMD_DURATION 可用，则不需要记录开始时间（零开销方案）
+    # 否则记录开始时间作为回退方案
+    if not set -q CMD_DURATION
+        set -g TELEMETRY_CMD_START_MS (_get_time_ms)
+    else
+        set -g TELEMETRY_CMD_START_MS 0
+    end
     set -g TELEMETRY_CMD_PENDING 1
 
     # fish_preexec receives command line as $argv
