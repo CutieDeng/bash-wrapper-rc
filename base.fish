@@ -27,9 +27,16 @@ set -g TELEMETRY_LAST_CMD ""
 set -g TELEMETRY_CMD_PENDING 0
 
 # ============ Datum Utilities ============
+# 转义特殊字符（用于 Datum 字符串）
+# 规则：先转义反斜杠，再转义双引号，最后用双引号包裹
 function _datum_escape
     set -l s "$argv[1]"
-    string escape $s | sed 's/"/\\"/g'
+    # 先转义反斜杠：\ -> \\
+    set s (string replace -a "\\" "\\\\" -- "$s")
+    # 再转义双引号：" -> \"
+    set s (string replace -a "\"" "\\\"" -- "$s")
+    # 用双引号包裹
+    echo "\"$s\""
 end
 
 function _build_datum
@@ -41,7 +48,7 @@ function _build_datum
 
     if test -n "$data"
         set -l escaped (_datum_escape "$data")
-        set result "$result (data . \"$escaped\")"
+        set result "$result (data . $escaped)"
     end
 
     if test -n "$duration"
