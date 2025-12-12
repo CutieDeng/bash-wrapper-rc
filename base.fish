@@ -26,6 +26,17 @@ set -g TELEMETRY_CMD_START_MS 0
 set -g TELEMETRY_LAST_CMD ""
 set -g TELEMETRY_CMD_PENDING 0
 
+# ============ Debug and Error Utilities ============
+function _debug
+    if test "$TELEMETRY_DEBUG" = "1"
+        echo "[TELEMETRY_DEBUG] $argv" >&2
+    end
+end
+
+function _error
+    echo "[TELEMETRY_ERROR] $argv" >&2
+end
+
 # ============ Datum Utilities ============
 # 转义特殊字符（用于 Datum 字符串）
 # 规则：先转义反斜杠，再转义双引号，最后用双引号包裹
@@ -98,13 +109,13 @@ function _tcp_send
     set -l timeout_s (printf '%.3f' (math "$timeout_ms/1000"))
 
     # 发送数据并接收响应（在同一连接中）
+    # 如果连接失败，返回空字符串
+    set -l output ""
     if command -v timeout >/dev/null 2>&1
         if command -v nc >/dev/null 2>&1
-            echo "$data" | timeout "$timeout_s" nc -w 1 "$host" "$port" 2>/dev/null
-            return $status
+            set output (echo "$data" | timeout "$timeout_s" nc -w 1 "$host" "$port" 2>/dev/null; or echo "")
         else if command -v telnet >/dev/null 2>&1
-            echo "$data" | timeout "$timeout_s" telnet "$host" "$port" 2>/dev/null
-            return $status
+            set output (echo "$data" | timeout "$timeout_s" telnet "$host" "$port" 2>/dev/null; or echo "")
         end
     else
         # 无 timeout 时，使用 nc/telnet 自带秒级超时
@@ -114,15 +125,21 @@ function _tcp_send
         end
 
         if command -v nc >/dev/null 2>&1
-            echo "$data" | nc -w "$fallback_s" "$host" "$port" 2>/dev/null
-            return $status
+            set output (echo "$data" | nc -w "$fallback_s" "$host" "$port" 2>/dev/null; or echo "")
         else if command -v telnet >/dev/null 2>&1
-            echo "$data" | telnet "$host" "$port" 2>/dev/null
-            return $status
+            set output (echo "$data" | telnet "$host" "$port" 2>/dev/null; or echo "")
         end
     end
 
-    return 1
+    # 输出响应内容（可能为空）
+    echo -n "$output"
+    
+    # 如果连接失败（输出为空），返回失败状态
+    if test -z "$output"
+        return 1
+    else
+        return 0
+    end
 end
 
 function _parse_datum_data
@@ -137,21 +154,44 @@ function _telemetry_init
         return 1
     end
 
+    _debug "=== Telemetry Init Start ==="
+
     set -l init_request (_build_init_datum "fish")
+    _debug "Server Host: $TELEMETRY_HOST"
+    _debug "Server Port: $TELEMETRY_PORT"
+
+    _debug "Connecting to init server..."
     set -l response (_tcp_send "$TELEMETRY_HOST" "$TELEMETRY_PORT" "$init_request" "$TELEMETRY_SEND_TIMEOUT_MS")
+    set -l send_status $status
     
-    if test -z "$response"
+    # 检查连接是否成功（服务器无法连接时 response 为空且状态码非零）
+    if test -z "$response"; or test $send_status -ne 0
+        _error "Failed to connect to server or init response is empty"
         return 1
     end
+
+    _debug "Init response: $response"
     
     # 服务器返回的是可直接执行的命令字符串，无需解析 datum 格式
-    eval $response 2>/dev/null; or true
+    _debug "Executing init commands..."
+    if eval $response 2>/dev/null
+        _debug "=== Telemetry Init Complete ==="
+        return 0
+    else
+        _error "Init command execution failed"
+        return 1
+    end
 end
 
 # Run initialization once
 if not set -q TELEMETRY_INITIALIZED
-    _telemetry_init
-    set -gx TELEMETRY_INITIALIZED 1
+    if _telemetry_init
+        set -gx TELEMETRY_INITIALIZED 1
+        _debug "Telemetry initialized successfully"
+    else
+        set -gx TELEMETRY_ENABLED 0
+        _debug "Telemetry disabled due to init failure"
+    end
 end
 
 # ============ Command Tracking ============
