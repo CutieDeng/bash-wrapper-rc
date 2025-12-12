@@ -7,38 +7,43 @@
 
 (define (time/string) (date->string (current-date) #t))
 
+(define (lprintf . args)
+  (define args^ (cons LOG_PORT args))
+  (apply fprintf args^)
+  (flush-output LOG_PORT))
+
 (define (handle/cmd-data data src-ip)
-  (fprintf LOG_PORT "((type command) (time ~s) (src-ip ~s) (cmd ~s))~n" (time/string) src-ip data) (flush-output LOG_PORT)
+  (lprintf "((type command) (time ~s) (src-ip ~s) (cmd ~s))~n" (time/string) src-ip data)
   
 )
 
 (define (handle/unknown u src-ip)
-  (fprintf LOG_PORT "((type unknown) (time ~s) (sub-type ~s) (version ~s))~n" (time/string) (dict-ref u 'type) (dict-ref u 'version)) (flush-output LOG_PORT)
+  (lprintf "((type unknown) (time ~s) (sub-type ~s) (version ~s))~n" (time/string) (dict-ref u 'type) (dict-ref u 'version))
 )
 
 (define (handle/init output src-ip shell-type)
-  (fprintf LOG_PORT "((type init) (time ~s) (src-ip ~s) (shell ~s))~n" (time/string) src-ip shell-type) (flush-output LOG_PORT)
+  (lprintf "((type init) (time ~s) (src-ip ~s) (shell ~s))~n" (time/string) src-ip shell-type)
   ;; 根据 shell 类型选择不同的初始化脚本
   (define welcome-file
     (match shell-type
       ["fish" "welcome.fish"]
       ["sh" "welcome.sh"]
       [_ 
-        (fprintf LOG_PORT "((warn ) (type init) (time ~s) (shell ~s) (reason ~s))~n" (time/string) src-ip shell-type "unknown shell type.") (flush-output LOG_PORT)
+        (lprintf "((warn ) (type init) (time ~s) (shell ~s) (reason ~s))~n" (time/string) src-ip shell-type "unknown shell type.")
         "welcome.sh"]))  ; 默认使用 sh
   (cond
     [(file-exists? welcome-file)
       (call-with-input-file welcome-file (lambda (input)
         (copy-port input output)))]
     [else
-      (fprintf LOG_PORT "((error ) (time ~s) (msg ~s) (file ~s))~n" (time/string) "welcome file not found:" welcome-file) (flush-output LOG_PORT)
+      (lprintf "((error ) (time ~s) (msg ~s) (file ~s))~n" (time/string) "welcome file not found:" welcome-file)
     ]
   )
 )
 
 (define (handle/tcp-connect input output)
   (match-define-values (src-ip _) (tcp-addresses input))
-  (fprintf LOG_PORT "((type meta-connect) (time ~s) (src-ip ~s))~n" (time/string) src-ip) (flush-output LOG_PORT)
+  (lprintf "((type meta-connect) (time ~s) (src-ip ~s))~n" (time/string) src-ip)
   (define r (read input))
   (define r^ (for/hash ([(k v) (in-dict r)]) (values k v)))
   (match r^
@@ -80,4 +85,18 @@
 (define (server-close)
   (kill-thread (tcp-server-thread))
   (custodian-shutdown-all (tcp-custodian))
+)
+
+(define (do-notification/win title content sound)
+  (define tmp-path (make-temporary-file "notif-~a.ps1"))
+  (with-output-to-file tmp-path (thunk (printf "New-BurntToastNotification -Text ~s, ~s -Sound ~s~n" title content sound)) #:exists 'truncate/replace)
+  (system (format "powershell -ExecutionPolicy Unrestricted -F ~a" tmp-path))
+  (with-handlers ([exn:fail:filesystem? (lambda (e) (lprintf "((warn ) (time ~s) (reason ~s) (file ~s) (sub-type do-notification/win))~n" (time/string) "fail to delete .ps1 script" tmp-path))]) (delete-file tmp-path))
+)
+
+(define (install-notification/win)
+  (define tmp-path (make-temporary-file "notif-~a.ps1"))
+  (with-output-to-file tmp-path (thunk (printf "Install-Module -Name BurntToast~n")) #:exists 'truncate/replace)
+  (system (format "powershell -ExecutionPolicy Unrestricted -F ~a" tmp-path))
+  (with-handlers ([exn:fail:filesystem? (lambda (e) (lprintf "((warn ) (time ~s) (reason ~s) (file ~s) (sub-type install-notification/win))~n" (time/string) "fail to delete .ps1 script" tmp-path))]) (delete-file tmp-path))
 )

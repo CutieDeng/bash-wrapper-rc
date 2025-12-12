@@ -298,8 +298,9 @@ _telemetry_cmd_preexec() {
     fi
 
     # 避免记录内部函数或 PROMPT_COMMAND 自身
+    # 注意：DEBUG trap 会在 PROMPT_COMMAND 执行时也触发，需要过滤
     case "${BASH_COMMAND:-}" in
-        _telemetry_*|PROMPT_COMMAND=*|"")
+        _telemetry_*|PROMPT_COMMAND=*|*_telemetry_cmd_postexec*|"")
             return 0
             ;;
     esac
