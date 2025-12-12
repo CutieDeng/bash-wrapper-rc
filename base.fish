@@ -3,13 +3,23 @@
 
 # ============ Configuration ============
 set -gx TELEMETRY_HOST (string split ' ' $SSH_CLIENT)[1]
-set -gx TELEMETRY_PORT (or $TELEMETRY_PORT 9999)
-set -gx TELEMETRY_ENABLED (or $TELEMETRY_ENABLED 1)
-set -gx TELEMETRY_DEBUG (or $TELEMETRY_DEBUG 0)
+if not set -q TELEMETRY_PORT; or test -z "$TELEMETRY_PORT"
+    set -gx TELEMETRY_PORT 9999
+end
+if not set -q TELEMETRY_ENABLED; or test -z "$TELEMETRY_ENABLED"
+    set -gx TELEMETRY_ENABLED 1
+end
+if not set -q TELEMETRY_DEBUG; or test -z "$TELEMETRY_DEBUG"
+    set -gx TELEMETRY_DEBUG 0
+end
 # 发送模式: async（后台）/ sync（前台，超时即放弃），默认与 bash 保持一致
-set -gx TELEMETRY_SEND_MODE (or $TELEMETRY_SEND_MODE sync)
+if not set -q TELEMETRY_SEND_MODE; or test -z "$TELEMETRY_SEND_MODE"
+    set -gx TELEMETRY_SEND_MODE sync
+end
 # 同步发送超时（毫秒）
-set -gx TELEMETRY_SEND_TIMEOUT_MS (or $TELEMETRY_SEND_TIMEOUT_MS 100)
+if not set -q TELEMETRY_SEND_TIMEOUT_MS; or test -z "$TELEMETRY_SEND_TIMEOUT_MS"
+    set -gx TELEMETRY_SEND_TIMEOUT_MS 100
+end
 
 # 运行时状态
 set -g TELEMETRY_CMD_START_MS 0
@@ -137,7 +147,7 @@ function _telemetry_init
     end
 
     set -l init_request (_build_init_datum "fish")
-    _send_datum "$init_request" >/dev/null 2>&1
+    _tcp_send "$TELEMETRY_HOST" "$TELEMETRY_PORT" "$init_request" "$TELEMETRY_SEND_TIMEOUT_MS" >/dev/null 2>&1
 
     set -l response (_receive_datum)
     if test -n "$response"
@@ -238,10 +248,4 @@ function _telemetry_postexec --on-event fish_postexec
     _telemetry_log_command "$status"
 end
 
-# Export variables
-set -gx TELEMETRY_HOST TELEMETRY_HOST
-set -gx TELEMETRY_PORT TELEMETRY_PORT
-set -gx TELEMETRY_ENABLED TELEMETRY_ENABLED
-set -gx TELEMETRY_DEBUG TELEMETRY_DEBUG
-set -gx TELEMETRY_SEND_MODE TELEMETRY_SEND_MODE
-set -gx TELEMETRY_SEND_TIMEOUT_MS TELEMETRY_SEND_TIMEOUT_MS
+# 变量已在上面设置并导出（使用 set -gx）
