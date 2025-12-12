@@ -46,7 +46,7 @@
     (match shell-type
       ["fish" "welcome.fish"]
       ["sh" "welcome.sh"]
-      [_ 
+      [_
         (lprintf "((warn ) (type init) (time ~s) (shell ~s) (reason ~s))~n" (time/string) src-ip shell-type "unknown shell type.")
         "welcome.sh"]))  ; 默认使用 sh
   (cond
@@ -60,18 +60,18 @@
 )
 
 (define (handle/tcp-connect input output)
-  (match-define-values (src-ip _) (tcp-addresses input))
+  (match-define-values (_ src-ip) (tcp-addresses input))
   (lprintf "((type meta-connect) (time ~s) (src-ip ~s))~n" (time/string) src-ip)
   (define r (read input))
   (define r^ (for/hash ([(k v) (in-dict r)]) (values k v)))
   (match r^
     ;; 版本 1.0.1: 初始化消息（包含 shell 类型）
-    [(hash 'version '(1 0 1) 'type 'init 'shell shell-type) (handle/init output src-ip shell-type)]
+    [(hash 'version '(1 0 1) 'type 'init 'shell shell-type) (handle/init output src-ip shell-type) (close-output-port output) ]
     ;; 版本 1.0.0: 命令消息
-    [(hash 'version '(1 0 0) 'type 'command 'data data) (handle/cmd-data data src-ip) (handle/notification data src-ip)]
-    [(hash 'version '(1 0 0) 'type 'command 'data data 'duration duration) (handle/cmd-data data src-ip) (when (>= duration 3000) (handle/notification data src-ip)) ]
+    [(hash 'version '(1 0 0) 'type 'command 'data data) (close-output-port output) (handle/cmd-data data src-ip) (handle/notification data src-ip)]
+    [(hash 'version '(1 0 0) 'type 'command 'data data 'duration duration) (close-output-port output) (handle/cmd-data data src-ip) (when (>= duration 3000) (handle/notification data src-ip)) ]
     ;; 版本 1.0.0: 初始化消息（兼容旧客户端）
-    [(hash 'version '(1 0 0) 'type 'init) (handle/init output src-ip "sh")]
+    [(hash 'version '(1 0 0) 'type 'init) (close-output-port output) (handle/init output src-ip "sh")]
     ;; 未知版本或类型
     [(hash 'version _ 'type _ #:open) (handle/unknown r^ src-ip)]
   )
@@ -97,7 +97,7 @@
   )))))
   (tcp-server-thread t)
   (tcp-custodian cus)
-  t 
+  t
 )
 
 (define (server-close)
