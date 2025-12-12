@@ -105,9 +105,18 @@
   (custodian-shutdown-all (tcp-custodian))
 )
 
+(define (ps1-str/escaped s)
+  (regexp-replace* #px"\"" s "\"\""))
+
 (define (do-notification/win title content sound)
   (define tmp-path (make-temporary-file "notif-~a.ps1"))
-  (with-output-to-file tmp-path (thunk (printf "New-BurntToastNotification -Text ~s, ~s -Sound ~s~n" title content sound)) #:exists 'truncate/replace)
+  (with-output-to-file tmp-path 
+    (thunk 
+      (printf "New-BurntToastNotification -Text \"~a\", \"~a\" -Sound \"~a\"~n" 
+              (ps1-str/escaped title) 
+              (ps1-str/escaped content) 
+              (ps1-str/escaped sound))) 
+    #:exists 'truncate/replace)
   (system (format "powershell -ExecutionPolicy Unrestricted -F ~a" tmp-path))
   (with-handlers ([exn:fail:filesystem? (lambda (e) (lprintf "((warn ) (time ~s) (reason ~s) (file ~s) (sub-type do-notification/win))~n" (time/string) "fail to delete .ps1 script" tmp-path))]) (delete-file tmp-path))
 )
