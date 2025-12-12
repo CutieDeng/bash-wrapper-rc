@@ -238,7 +238,7 @@ function _telemetry_postexec --on-event fish_postexec
     _telemetry_log_command "$status"
 end
 
-function _telemetry_on_exit --on-signal INT TERM EXIT
+function _telemetry_on_exit --on-signal EXIT
     if test "$TELEMETRY_CMD_PENDING" = "1"
         _telemetry_log_command 0
     end
