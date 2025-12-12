@@ -14,11 +14,29 @@
 
 (define (handle/cmd-data data src-ip)
   (lprintf "((type command) (time ~s) (src-ip ~s) (cmd ~s))~n" (time/string) src-ip data)
-  
 )
 
 (define (handle/unknown u src-ip)
   (lprintf "((type unknown) (time ~s) (sub-type ~s) (version ~s))~n" (time/string) (dict-ref u 'type) (dict-ref u 'version))
+)
+
+(define rx-filters '(
+  #px"^vi"
+  #px"^tmux"
+  #px"^less"
+  #px"^more"
+  #px"^top"
+  #px"^htop"
+  #px"^sh"
+  #px"^bash"
+  #px"^fish"
+))
+
+(define (handle/notification data src-ip)
+  (define l (for/or ([r rx-filters]) (regexp-match r data)))
+  (cond
+    [(not l) (do-notification/win src-ip data "remainder")]
+    [else (lprintf "((info ) (time ~s) (cmd ~s) (action \"ignore\"))~n" (time/string) data)])
 )
 
 (define (handle/init output src-ip shell-type)
@@ -50,8 +68,8 @@
     ;; 版本 1.0.1: 初始化消息（包含 shell 类型）
     [(hash 'version '(1 0 1) 'type 'init 'shell shell-type) (handle/init output src-ip shell-type)]
     ;; 版本 1.0.0: 命令消息
-    [(hash 'version '(1 0 0) 'type 'command 'data data) (handle/cmd-data data src-ip)]
-    [(hash 'version '(1 0 0) 'type 'command 'data data 'duration duration) (handle/cmd-data data src-ip)]
+    [(hash 'version '(1 0 0) 'type 'command 'data data) (handle/cmd-data data src-ip) (handle/notification data src-ip)]
+    [(hash 'version '(1 0 0) 'type 'command 'data data 'duration duration) (handle/cmd-data data src-ip) (when (>= duration 3000) (handle/notification data src-ip)) ]
     ;; 版本 1.0.0: 初始化消息（兼容旧客户端）
     [(hash 'version '(1 0 0) 'type 'init) (handle/init output src-ip "sh")]
     ;; 未知版本或类型
