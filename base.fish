@@ -192,7 +192,7 @@ function _telemetry_log_command
     end
 
     if test "$TELEMETRY_DEBUG" = "1"
-        echo "[TELEMETRY_DEBUG] cmd=$cmd status=$status_code duration=${duration}ms" >&2
+        echo "[TELEMETRY_DEBUG] cmd=$cmd status=$status_code duration="$duration"ms" >&2
     end
 
     set -l datum (_build_datum command "$cmd" "$duration")
@@ -236,12 +236,6 @@ end
 function _telemetry_postexec --on-event fish_postexec
     # fish_postexec receives: commandline; status in $status
     _telemetry_log_command "$status"
-end
-
-function _telemetry_on_exit --on-signal EXIT
-    if test "$TELEMETRY_CMD_PENDING" = "1"
-        _telemetry_log_command 0
-    end
 end
 
 # Export variables
