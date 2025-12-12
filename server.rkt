@@ -35,7 +35,7 @@
 (define (handle/notification data src-ip)
   (define l (for/or ([r rx-filters]) (regexp-match r data)))
   (cond
-    [(not l) (do-notification/win src-ip data "remainder")]
+    [(not l) (do-notification/win src-ip data "reminder")]
     [else (lprintf "((info ) (time ~s) (cmd ~s) (action \"ignore\"))~n" (time/string) data)])
 )
 
