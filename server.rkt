@@ -13,28 +13,26 @@
 )
 
 (define (handle/unknown u src-ip)
-  (fprintf LOG_PORT "((type unknown) (time ~s) (sub-type ~s) (version ~s))~n" (time/string) (dict-ref u 'type) (dict-ref u 'version))
+  (fprintf LOG_PORT "((type unknown) (time ~s) (sub-type ~s) (version ~s))~n" (time/string) (dict-ref u 'type) (dict-ref u 'version)) (flush-output LOG_PORT)
 )
 
 (define (handle/init output src-ip shell-type)
-  (fprintf LOG_PORT "((type init) (time ~s) (src-ip ~s) (shell ~s))~n" (time/string) src-ip shell-type)
-  (flush-output LOG_PORT)
+  (fprintf LOG_PORT "((type init) (time ~s) (src-ip ~s) (shell ~s))~n" (time/string) src-ip shell-type) (flush-output LOG_PORT)
   ;; 根据 shell 类型选择不同的初始化脚本
   (define welcome-file
     (match shell-type
       ["fish" "welcome.fish"]
       ["sh" "welcome.sh"]
       [_ 
-        (fprintf LOG_PORT "((warn ) (type init) (time ~s) (shell ~s) (reason ~s))~n" (time/string) src-ip shell-type "unknown shell type.")
-        (flush-output LOG_PORT)
+        (fprintf LOG_PORT "((warn ) (type init) (time ~s) (shell ~s) (reason ~s))~n" (time/string) src-ip shell-type "unknown shell type.") (flush-output LOG_PORT)
         "welcome.sh"]))  ; 默认使用 sh
   (cond
     [(file-exists? welcome-file)
       (call-with-input-file welcome-file (lambda (input)
         (copy-port input output)))]
     [else
-      (fprintf LOG_PORT "((error ) (time ~s) (msg ~s) (file ~s))~n" (time/string) "welcome file not found:" welcome-file)
-      (flush-output LOG_PORT)]
+      (fprintf LOG_PORT "((error ) (time ~s) (msg ~s) (file ~s))~n" (time/string) "welcome file not found:" welcome-file) (flush-output LOG_PORT)
+    ]
   )
 )
 
@@ -72,6 +70,7 @@
         )
         (custodian-shutdown-all cus2)))
     )
+    (loop)
   )))))
   (tcp-server-thread t)
   (tcp-custodian cus)
