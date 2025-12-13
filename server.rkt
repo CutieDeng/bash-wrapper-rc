@@ -16,10 +16,26 @@
   (fprintf LOG_PORT "((type unknown) (time ~s) (sub-type ~s) (version ~s))~n" (time/string) (dict-ref u 'type) (dict-ref u 'version))
 )
 
-(define (handle/init output src-ip)
-  (fprintf LOG_PORT "((type init) (time ~s) (src-ip ~s))~n" (time/string) src-ip)
-  (call-with-input-file "welcome.sh" (lambda (input)
-    (copy-port (input output))))
+(define (handle/init output src-ip shell-type)
+  (fprintf LOG_PORT "((type init) (time ~s) (src-ip ~s) (shell ~s))~n" (time/string) src-ip shell-type)
+  (flush-output LOG_PORT)
+  ;; 根据 shell 类型选择不同的初始化脚本
+  (define welcome-file
+    (match shell-type
+      ["fish" "welcome.fish"]
+      ["sh" "welcome.sh"]
+      [_ 
+        (fprintf LOG_PORT "((warn ) (type init) (time ~s) (shell ~s) (reason ~s))~n" (time/string) src-ip shell-type "unknown shell type.")
+        (flush-output LOG_PORT)
+        "welcome.sh"]))  ; 默认使用 sh
+  (cond
+    [(file-exists? welcome-file)
+      (call-with-input-file welcome-file (lambda (input)
+        (copy-port input output)))]
+    [else
+      (fprintf LOG_PORT "((error ) (time ~s) (msg ~s) (file ~s))~n" (time/string) "welcome file not found:" welcome-file)
+      (flush-output LOG_PORT)]
+  )
 )
 
 (define (handle/tcp-connect input output)
@@ -28,9 +44,14 @@
   (define r (read input))
   (define r^ (for/hash ([(k v) (in-dict r)]) (values k v)))
   (match r^
+    ;; 版本 1.0.1: 初始化消息（包含 shell 类型）
+    [(hash 'version '(1 0 1) 'type 'init 'shell shell-type) (handle/init output src-ip shell-type)]
+    ;; 版本 1.0.0: 命令消息
     [(hash 'version '(1 0 0) 'type 'command 'data data) (handle/cmd-data data src-ip)]
     [(hash 'version '(1 0 0) 'type 'command 'data data 'duration duration) (handle/cmd-data data src-ip)]
-    [(hash 'version '(1 0 0) 'type 'init) (handle/init output src-ip)]
+    ;; 版本 1.0.0: 初始化消息（兼容旧客户端）
+    [(hash 'version '(1 0 0) 'type 'init) (handle/init output src-ip "sh")]
+    ;; 未知版本或类型
     [(hash 'version _ 'type _ #:open) (handle/unknown r^ src-ip)]
   )
 )

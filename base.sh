@@ -63,6 +63,12 @@ _build_datum() {
     printf '%s' "$result"
 }
 
+# 构建初始化消息（版本 1.0.1，包含 shell 类型）
+_build_init_datum() {
+    local shell_type="$1"  # "sh" 或 "fish"
+    printf '((version 1 0 1) (type . init) (shell . "%s"))' "$shell_type"
+}
+
 # ============ Network Utils ============
 
 # 获取 SSH 客户端 IP（从 SSH_CLIENT 或 SSH_CONNECTION）
@@ -184,7 +190,7 @@ _telemetry_init() {
     _debug "Connecting to init server..."
 
     local init_msg init_response
-    init_msg=$(_build_datum "init" "")
+    init_msg=$(_build_init_datum "sh")
     init_response=$(_tcp_send "$server_ip" "$TELEMETRY_PORT" "$init_msg")
     
     if [ -z "$init_response" ]; then

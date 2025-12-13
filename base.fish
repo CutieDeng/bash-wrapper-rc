@@ -42,6 +42,12 @@ function _build_datum
     echo -n "$result"
 end
 
+# 构建初始化消息（版本 1.0.1，包含 shell 类型）
+function _build_init_datum
+    set -l shell_type "$argv[1]"  # "sh" 或 "fish"
+    echo -n "((version 1 0 1) (type . init) (shell . \"$shell_type\"))"
+end
+
 # ============ Timing ============
 # 获取当前时间戳（毫秒），使用简单方法以减少性能开销
 # 注意：使用 date +%s 秒级精度，对于命令追踪已足够
@@ -130,7 +136,7 @@ function _telemetry_init
         return 1
     end
 
-    set -l init_request (_build_datum init "")
+    set -l init_request (_build_init_datum "fish")
     _send_datum "$init_request" >/dev/null 2>&1
 
     set -l response (_receive_datum)
