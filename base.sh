@@ -243,6 +243,15 @@ _telemetry_log_command() {
             ;;
     esac
 
+    # 如果命令被中断（Ctrl+C），不记录
+    if [ "$status" -eq 130 ] 2>/dev/null; then
+        _debug "Command interrupted by Ctrl+C, skipping log: $cmd"
+        TELEMETRY_CMD_START_MS=0
+        TELEMETRY_LAST_CMD=""
+        TELEMETRY_CMD_PENDING=0
+        return 0
+    fi
+
     # 如果没有记录开始时间，跳过
     if [ "$TELEMETRY_CMD_START_MS" -eq 0 ] 2>/dev/null; then
         TELEMETRY_CMD_PENDING=0
@@ -273,7 +282,7 @@ _telemetry_log_command() {
         # 同步：使用严格超时（默认 100ms），超时即放弃，不后台，不产生日志作业提示
         _tcp_send "$server_ip" "$TELEMETRY_PORT" "$datum" "$TELEMETRY_SEND_TIMEOUT_MS" >/dev/null 2>&1 </dev/null || _error "Failed to send command log"
     else
-        # 异步：后台发送，静默，避免 “[1]+ Done ...” 的作业提示
+        # 异步：后台发送，静默，避免 "[1]+ Done ..." 的作业提示
         local __restore_monitor=0
         if [ -n "${BASH_VERSION:-}" ] && shopt -qo monitor; then
             __restore_monitor=1
@@ -300,13 +309,13 @@ _telemetry_cmd_preexec() {
     # 避免记录内部函数或 PROMPT_COMMAND 自身
     # 注意：DEBUG trap 会在 PROMPT_COMMAND 执行时也触发，需要过滤
     case "${BASH_COMMAND:-}" in
-        _telemetry_*|PROMPT_COMMAND=*|*_telemetry_cmd_postexec*|"")
+        _telemetry_*|PROMPT_COMMAND=*|*_telemetry_cmd_postexec*|"_telemetry_*"*)
             return 0
             ;;
     esac
 
+    # 记录命令开始时间和内容
     TELEMETRY_CMD_START_MS=$(_get_time_ms)
-    TELEMETRY_CMD_PENDING=1
 
     # 尝试获取当前命令内容
     if [ -n "${BASH_COMMAND:-}" ]; then
@@ -320,6 +329,11 @@ _telemetry_cmd_preexec() {
     fi
 
     TELEMETRY_LAST_CMD=$(echo "$TELEMETRY_LAST_CMD" | sed 's/^[[:space:]]*//')
+
+    # 设置命令为待处理状态
+    TELEMETRY_CMD_PENDING=1
+
+    return 0
 }
 
 # 命令结束后（postexec）：通过 PROMPT_COMMAND 触发
@@ -349,6 +363,7 @@ _telemetry_setup_hooks() {
         else
             PROMPT_COMMAND='_telemetry_cmd_postexec'
         fi
+        # 设置 DEBUG trap 来捕获命令开始
         trap '_telemetry_cmd_preexec' DEBUG
     fi
 }
@@ -360,6 +375,7 @@ _telemetry_cleanup() {
     if [ "$TELEMETRY_CMD_PENDING" = "1" ]; then
         _telemetry_log_command
     fi
+    # 清理 trap
     trap - DEBUG
 }
 
