@@ -307,26 +307,18 @@ _telemetry_cmd_preexec() {
         return 0
     fi
 
-    # 如果在 PROMPT_COMMAND 执行期间，跳过所有命令
-    if [ "$TELEMETRY_IN_PROMPT" = "1" ]; then
-        return 0
-    fi
+    local cmd="${BASH_COMMAND:-}"
 
-    # 避免记录内部函数或 PROMPT_COMMAND 自身
-    # 注意：DEBUG trap 会在 PROMPT_COMMAND 执行时也触发，需要过滤
-    case "${BASH_COMMAND:-}" in
-        _telemetry_*|PROMPT_COMMAND=*|*_telemetry_cmd_postexec*|"_telemetry_*"*)
+    # 过滤掉内部命令和 PROMPT_COMMAND 相关的赋值
+    case "$cmd" in
+        _telemetry_*|TELEMETRY_*|PROMPT_COMMAND=*|__TELEMETRY_*|"")
             return 0
             ;;
     esac
 
-    # 记录命令开始时间
-    TELEMETRY_CMD_START_MS=$(_get_time_ms)
-
-    # 获取当前命令内容
-    local cmd=""
-    if [ -n "${BASH_COMMAND:-}" ]; then
-        cmd="$BASH_COMMAND"
+    # 如果在 PROMPT_COMMAND 执行期间，跳过所有用户命令
+    if [ "$TELEMETRY_IN_PROMPT" = "1" ]; then
+        return 0
     fi
 
     # 清理命令内容，去除前后空白
@@ -334,9 +326,11 @@ _telemetry_cmd_preexec() {
 
     # 检查是否为空命令或回车
     if [ -z "$cmd" ]; then
-        # 空命令不记录
         return 0
     fi
+
+    # 记录命令开始时间
+    TELEMETRY_CMD_START_MS=$(_get_time_ms)
 
     # 记录命令
     TELEMETRY_LAST_CMD="$cmd"
