@@ -19,6 +19,7 @@ TELEMETRY_SEND_TIMEOUT_MS="${TELEMETRY_SEND_TIMEOUT_MS:-100}"
 TELEMETRY_CMD_START_MS=0
 TELEMETRY_LAST_CMD=""
 TELEMETRY_CMD_PENDING=0  # 标记是否有待处理的命令
+TELEMETRY_IN_PROMPT=0    # 标记是否在 PROMPT_COMMAND 执行期间（用于屏蔽 PROMPT 内的命令）
 
 _debug() {
     if [ "$TELEMETRY_DEBUG" = "1" ]; then
@@ -306,6 +307,11 @@ _telemetry_cmd_preexec() {
         return 0
     fi
 
+    # 如果在 PROMPT_COMMAND 执行期间，跳过所有命令
+    if [ "$TELEMETRY_IN_PROMPT" = "1" ]; then
+        return 0
+    fi
+
     # 避免记录内部函数或 PROMPT_COMMAND 自身
     # 注意：DEBUG trap 会在 PROMPT_COMMAND 执行时也触发，需要过滤
     case "${BASH_COMMAND:-}" in
@@ -314,21 +320,26 @@ _telemetry_cmd_preexec() {
             ;;
     esac
 
-    # 记录命令开始时间和内容
+    # 记录命令开始时间
     TELEMETRY_CMD_START_MS=$(_get_time_ms)
 
-    # 尝试获取当前命令内容
+    # 获取当前命令内容
+    local cmd=""
     if [ -n "${BASH_COMMAND:-}" ]; then
-        TELEMETRY_LAST_CMD="$BASH_COMMAND"
-    elif command -v fc >/dev/null 2>&1; then
-        TELEMETRY_LAST_CMD=$(fc -l -1 2>/dev/null | sed 's/^[[:space:]]*[0-9]*[[:space:]]*//' || echo "")
-    elif command -v history >/dev/null 2>/dev/null && [ -n "${HISTFILE:-}" ]; then
-        TELEMETRY_LAST_CMD=$(history 1 2>/dev/null | sed 's/^[[:space:]]*[0-9]*[[:space:]]*//' || echo "")
-    else
-        TELEMETRY_LAST_CMD="<command>"
+        cmd="$BASH_COMMAND"
     fi
 
-    TELEMETRY_LAST_CMD=$(echo "$TELEMETRY_LAST_CMD" | sed 's/^[[:space:]]*//')
+    # 清理命令内容，去除前后空白
+    cmd=$(echo "$cmd" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+
+    # 检查是否为空命令或回车
+    if [ -z "$cmd" ]; then
+        # 空命令不记录
+        return 0
+    fi
+
+    # 记录命令
+    TELEMETRY_LAST_CMD="$cmd"
 
     # 设置命令为待处理状态
     TELEMETRY_CMD_PENDING=1
@@ -359,9 +370,11 @@ _telemetry_setup_hooks() {
         # 保留已有 PROMPT_COMMAND
         if [ -n "${PROMPT_COMMAND:-}" ]; then
             __TELEMETRY_ORIG_PROMPT_COMMAND="$PROMPT_COMMAND"
-            PROMPT_COMMAND='_telemetry_cmd_postexec; '"$__TELEMETRY_ORIG_PROMPT_COMMAND"
+            # 包装整个 PROMPT_COMMAND，设置标志位来屏蔽期间的命令
+            PROMPT_COMMAND='TELEMETRY_IN_PROMPT=1; _telemetry_cmd_postexec; '"$__TELEMETRY_ORIG_PROMPT_COMMAND"'; TELEMETRY_IN_PROMPT=0'
         else
-            PROMPT_COMMAND='_telemetry_cmd_postexec'
+            # 如果没有原始 PROMPT_COMMAND，只执行我们的函数
+            PROMPT_COMMAND='TELEMETRY_IN_PROMPT=1; _telemetry_cmd_postexec; TELEMETRY_IN_PROMPT=0'
         fi
         # 设置 DEBUG trap 来捕获命令开始
         trap '_telemetry_cmd_preexec' DEBUG
