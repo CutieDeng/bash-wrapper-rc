@@ -85,6 +85,9 @@ _get_server_ip() {
 }
 
 # TCP 同步连接（init 和日志上报）
+# 注意：对于 fire-and-forget 场景，nc 退出码不可靠判断"数据是否发送成功"
+#   - 服务器收到数据后关闭连接 → nc 可能返回非零（但数据已成功发送）
+#   - 因此本函数采用"尽力发送"策略：只在明确连接失败时返回错误
 _tcp_send() {
     local host="$1"
     local port="$2"
@@ -102,31 +105,70 @@ _tcp_send() {
 
     _debug "TCP send to $host:$port (timeout ${timeout_ms}ms)"
 
+    # nc 参数说明：
+    #   -w N : 连接超时秒数（也影响空闲超时）
+    #   -N   : stdin EOF 后关闭写端（macOS/BSD nc 支持，GNU nc 可能不支持）
+    #   -q 0 : stdin EOF 后立即退出（GNU nc 支持，BSD nc 不支持）
+    #
+    # 退出码处理策略：
+    #   - 超时命令返回 124 表示超时（连接失败）→ 报错
+    #   - nc 返回非零但数据可能已发送 → 忽略（fire-and-forget）
+    #   - 只有在完全无法执行时才报错
+
+    local nc_exit=0
+
     if command -v timeout >/dev/null 2>&1; then
         if command -v nc >/dev/null 2>&1; then
-            echo "$data" | timeout "$timeout_s" nc -w 1 "$host" "$port" 2>/dev/null || return 1
+            # 尝试使用 -N 参数（发送完立即关闭），如果不支持则退化
+            echo "$data" | timeout "$timeout_s" nc -N -w 1 "$host" "$port" 2>/dev/null
+            nc_exit=$?
+            if [ $nc_exit -eq 1 ]; then
+                # -N 可能不支持，重试不带 -N
+                echo "$data" | timeout "$timeout_s" nc -w 1 "$host" "$port" 2>/dev/null
+                nc_exit=$?
+            fi
         elif command -v telnet >/dev/null 2>&1; then
-            (echo "$data"; sleep 1) | timeout "$timeout_s" telnet "$host" "$port" 2>/dev/null || return 1
+            (echo "$data"; sleep 0.1) | timeout "$timeout_s" telnet "$host" "$port" 2>/dev/null
+            nc_exit=$?
         else
             _error "No nc/telnet available"
             return 1
         fi
+
+        # timeout 返回 124 表示超时（连接失败）
+        if [ $nc_exit -eq 124 ]; then
+            _debug "Connection timed out"
+            return 1
+        fi
     else
-        # 无 timeout 时，退化为近似：nc/telnet 自身超时参数（秒级），尽量用 1 秒
+        # 无 timeout 时，退化为近似：nc/telnet 自身超时参数（秒级）
         local fallback_s
         fallback_s=$(( (timeout_ms + 999) / 1000 ))
         [ "$fallback_s" -le 0 ] && fallback_s=1
 
         if command -v nc >/dev/null 2>&1; then
-            echo "$data" | nc -w "$fallback_s" "$host" "$port" 2>/dev/null || return 1
+            echo "$data" | nc -N -w "$fallback_s" "$host" "$port" 2>/dev/null
+            nc_exit=$?
+            if [ $nc_exit -eq 1 ]; then
+                echo "$data" | nc -w "$fallback_s" "$host" "$port" 2>/dev/null
+                nc_exit=$?
+            fi
         elif command -v telnet >/dev/null 2>&1; then
-            (echo "$data"; sleep 1) | telnet "$host" "$port" 2>/dev/null || return 1
+            (echo "$data"; sleep 0.1) | telnet "$host" "$port" 2>/dev/null
+            nc_exit=$?
         else
             _error "No nc/telnet available"
             return 1
         fi
     fi
 
+    # fire-and-forget：除非明确连接失败，否则认为成功
+    # nc 常见退出码：
+    #   0   - 正常（理想情况）
+    #   1   - 通用错误（可能是连接后关闭，数据可能已发送）
+    #   >1  - 其他错误
+    # 这里我们只在完全无法连接时报错，其他情况认为"尽力发送"成功
+    _debug "nc exit code: $nc_exit (ignored for fire-and-forget)"
     return 0
 }
 
@@ -321,6 +363,12 @@ _telemetry_cmd_preexec() {
         return 0
     fi
 
+    # 如果已经有待处理的命令，说明这是同一行中的子命令（如 sleep 1; sleep 2;）
+    # 此时不更新 TELEMETRY_LAST_CMD，保持原始完整命令行
+    if [ "$TELEMETRY_CMD_PENDING" = "1" ]; then
+        return 0
+    fi
+
     # 清理命令内容，去除前后空白
     cmd=$(echo "$cmd" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
 
@@ -329,10 +377,10 @@ _telemetry_cmd_preexec() {
         return 0
     fi
 
-    # 记录命令开始时间
+    # 记录命令开始时间（仅在第一次 DEBUG 触发时）
     TELEMETRY_CMD_START_MS=$(_get_time_ms)
 
-    # 记录命令
+    # 记录命令（完整命令行）
     TELEMETRY_LAST_CMD="$cmd"
 
     # 设置命令为待处理状态
