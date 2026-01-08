@@ -127,6 +127,11 @@ _tcp_send() {
                 echo "$data" | timeout "$timeout_s" nc -w 1 "$host" "$port" 2>/dev/null
                 nc_exit=$?
             fi
+            if [ $nc_exit -eq 2 ]; then
+                # -N 可能不支持，重试不带 -N
+                echo "$data" | timeout "$timeout_s" nc -w 1 "$host" "$port" 2>/dev/null
+                nc_exit=$?
+            fi
         elif command -v telnet >/dev/null 2>&1; then
             (echo "$data"; sleep 0.1) | timeout "$timeout_s" telnet "$host" "$port" 2>/dev/null
             nc_exit=$?
@@ -150,6 +155,10 @@ _tcp_send() {
             echo "$data" | nc -N -w "$fallback_s" "$host" "$port" 2>/dev/null
             nc_exit=$?
             if [ $nc_exit -eq 1 ]; then
+                echo "$data" | nc -w "$fallback_s" "$host" "$port" 2>/dev/null
+                nc_exit=$?
+            fi
+            if [ $nc_exit -eq 2 ]; then
                 echo "$data" | nc -w "$fallback_s" "$host" "$port" 2>/dev/null
                 nc_exit=$?
             fi
